@@ -145,17 +145,41 @@ python tools/scan_dyads.py gdelt_50d.csv --no-header --min-events 500 --top 40
 ## Разметка по UCDP и сбор данных
 
 - `data/UcdpPrioConflict_v26_1.xlsx` — UCDP/PRIO Armed Conflict Dataset v26.1 (источник разметки).
+- `data/Dyadic_v26_1.xlsx` — UCDP Dyadic v26.1, тот же набор конфликтов в разрезе диад
+  (155 межгосударственных диада-лет, 53 диады). Проверено: список кейсов из него выходит
+  тот же самый, поэтому основным источником остаётся ACD.
 - `tools/build_case_list.py` — превращает его в список кейсов: межгосударственные эпизоды
   (`type_of_conflict = 2`), разложенные на пары государств, с переводом кодов
   Gleditsch-Ward в коды стран GDELT, окном сбора [день X − 60; день X − 1] и отметкой,
   какими файлами GDELT покрыт период.
 - `data/case_list.csv` — результат: 42 пары-кейса с 1979 года.
-- `tools/fetch_gdelt.py` — качает суточные выгрузки GDELT по этому списку, оставляет только
-  строки нужной пары, складывает по файлу на кейс. Прерывается и продолжается с места остановки.
+- `tools/collect_cases.py` — **одна команда «сделать всё»**: читает файл UCDP, строит список
+  кейсов, скачивает суточные выгрузки GDELT за нужные окна, оставляет только строки нужной пары
+  (в обе стороны: A→B и B→A) и раскладывает по одному CSV на кейс в указанную папку. Туда же
+  пишутся `case_list.csv` (что собирали) и `manifest.csv` (что получилось: строки, дни, даты).
+  Общие даты между кейсами скачиваются один раз — на текущем списке это 495 загрузок вместо 600.
+  Рядом с каждым CSV ведётся журнал обработанных дней `<файл>.days`, поэтому прерванный сбор
+  продолжается с места остановки и не перекачивает уже разобранные дни (включая те, где строк
+  по паре не нашлось вовсе).
+- `tools/fetch_gdelt.py` — та же загрузка, но по одному кейсу за раз, без общего планировщика дат.
+  Оставлен как более простой вариант для точечной докачки.
+
+```bash
+python tools/collect_cases.py data/UcdpPrioConflict_v26_1.xlsx --out data/cases --dry-run
+python tools/collect_cases.py data/UcdpPrioConflict_v26_1.xlsx --out data/cases
+python tools/collect_cases.py data/UcdpPrioConflict_v26_1.xlsx --out data/cases --only RUS-UKR
+```
+
+Полезные флаги `collect_cases.py`: `--limit N` (взять первые N кейсов), `--workers` (сколько дней
+качать параллельно, по умолчанию 4), `--pause` (пауза между запросами), `--window` (длина окна
+в днях), `--all-precisions` (брать и кейсы с неточной датой начала), `--types` (типы конфликтов
+UCDP). Сбор всех 10 доступных кейсов — примерно 9,7 ГБ трафика.
+
+Запускать нужно на своей машине: в этой среде домен `data.gdeltproject.org` закрыт списком
+разрешённых адресов, поэтому здесь скрипт проверен на подменённой загрузке, а не на живой сети.
 
 ```bash
 python tools/build_case_list.py data/UcdpPrioConflict_v26_1.xlsx --out data/case_list.csv
-python tools/fetch_gdelt.py data/case_list.csv --dry-run
 python tools/fetch_gdelt.py data/case_list.csv --only RUS-UKR --out data/cases
 ```
 
