@@ -24,7 +24,7 @@
 Файл самодостаточный: кроме него ничего класть рядом не нужно.
 """
 from __future__ import annotations
-import argparse, io, os, sys, time, zipfile
+import argparse, glob, io, os, sys, time, zipfile
 import urllib.request, urllib.error
 from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
@@ -313,13 +313,62 @@ def split_by_pairs(raw: bytes, pairs: list[tuple[str, str]]) -> dict[tuple[str, 
             for p, v in out.items()}
 
 
-def plan_days(C: pd.DataFrame, out_dir: str) -> tuple[dict, dict]:
+def adopt(C: pd.DataFrame, folder: str, dry: bool) -> dict:
+    """Зачитывает уже собранные CSV (те же 58 колонок GDELT) в кейсы.
+
+    Для каждого файла определяет пару и диапазон дат по самим данным и отдаёт
+    кейсу ту часть его окна, которую файл покрывает. Предполагается, что внутри
+    своего диапазона файл сплошной — так его и собирали.
+    """
+    covered: dict[int, set] = {i: set() for i in C.index}
+    if not folder:
+        return covered
+    files = sorted(glob.glob(os.path.join(folder, "*.csv")))
+    print(f"\nПереиспользование: просмотрено файлов {len(files)} в {folder}")
+    for f in files:
+        try:
+            d = pd.read_csv(f, dtype=str, low_memory=False)
+        except Exception:
+            continue
+        if list(d.columns) != GDELT_COLUMNS:
+            continue
+        day = d.DATEADDED.astype(str).str[:8]
+        pair = pd.Series(["-".join(sorted([str(a), str(b)])) for a, b in zip(d[A1], d[A2])])
+        for pr, idx in pair.groupby(pair).groups.items():
+            part, pday = d.loc[idx], day.loc[idx]
+            lo, hi = pday.min(), pday.max()
+            for i, r in C[C.пара == pr].iterrows():
+                w_from = max(r.окно_с, DAILY_FROM).strftime("%Y%m%d")
+                w_to = r.окно_по.strftime("%Y%m%d")
+                a, b = max(lo, w_from), min(hi, w_to)
+                if a > b:
+                    continue
+                days = {x.strftime("%Y%m%d") for x in pd.date_range(a, b)} - covered[i]
+                if not days:
+                    continue
+                sel = part[pday.isin(days)]
+                print(f"  {os.path.basename(f)} -> {r.пара} {r.день_X.date()}: "
+                      f"дней {len(days)}, строк {len(sel)}")
+                covered[i] |= days
+                if not dry:
+                    if not os.path.exists(r.файл):
+                        pd.DataFrame(columns=GDELT_COLUMNS).to_csv(r.файл, index=False)
+                    if len(sel):
+                        sel[GDELT_COLUMNS].to_csv(r.файл, mode="a", header=False, index=False)
+                    with open(r.журнал, "a", encoding="utf-8") as jf:
+                        jf.write("".join(x + "\n" for x in sorted(days)))
+    total = sum(len(v) for v in covered.values())
+    print(f"  итого зачтено дней: {total} (~{total * MB_PER_DAY / 1024:.1f} ГБ качать не нужно)")
+    return covered
+
+
+def plan_days(C: pd.DataFrame, out_dir: str, covered: dict | None = None) -> tuple[dict, dict]:
     """Какие дни кому нужны и что уже собрано (по журналу рядом с каждым CSV)."""
     need, already = {}, {}
     for i, r in C.iterrows():
-        done = set()
+        done = set(covered.get(i, set())) if covered else set()
         if os.path.exists(r.журнал):
-            done = {ln.strip() for ln in open(r.журнал, encoding="utf-8") if ln.strip()}
+            done |= {ln.strip() for ln in open(r.журнал, encoding="utf-8") if ln.strip()}
         already[i] = done
         for day in pd.date_range(max(r.окно_с, DAILY_FROM), r.окно_по):
             ds = day.strftime("%Y%m%d")
@@ -423,6 +472,8 @@ def main():
     ap.add_argument("--limit", type=int, default=None, help="взять только N первых кейсов")
     ap.add_argument("--workers", type=int, default=4, help="параллельных загрузок")
     ap.add_argument("--pause", type=float, default=0.2, help="пауза между запросами, секунд")
+    ap.add_argument("--reuse", default=None,
+                    help="папка с уже собранными CSV в схеме GDELT — их дни будут зачтены")
     ap.add_argument("--dry-run", action="store_true", help="показать план и выйти")
     args = ap.parse_args()
 
@@ -460,9 +511,10 @@ def main():
     exp[CASE_COLS].to_csv(os.path.join(args.out, "case_list.csv"), index=False, encoding="utf-8-sig")
 
     # --- 2. план ------------------------------------------------------------
-    need, already = plan_days(C, args.out)
-    wars = int((C.метка == 1).sum())
     print("\n".join(report))
+    covered = adopt(C, args.reuse, args.dry_run)
+    need, already = plan_days(C, args.out, covered)
+    wars = int((C.метка == 1).sum())
     print(f"\nКейсов к сбору: {len(C)} (войн {wars}, контролей {len(C) - wars}) | "
           f"уникальных дней к скачиванию: {len(need)}")
     dup = sum(len(v) for v in need.values()) - len(need)
