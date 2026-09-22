@@ -37,7 +37,10 @@ def daily_from_case(path: str) -> pd.DataFrame:
         return pd.DataFrame()
     for c in ("AvgTone", "GoldsteinScale", "QuadClass", "EventRootCode", "EventCode"):
         d[c] = pd.to_numeric(d[c], errors="coerce")
-    d["date"] = pd.to_datetime(d.DATEADDED.astype(str).str[:8], format="%Y%m%d", errors="coerce")
+    # В суточных файлах есть DATEADDED (день попадания в новости), в старых
+    # месячных и годовых его нет — там ориентир SQLDATE (день события).
+    поле = "DATEADDED" if "DATEADDED" in d.columns and d.DATEADDED.notna().any() else "SQLDATE"
+    d["date"] = pd.to_datetime(d[поле].astype(str).str[:8], format="%Y%m%d", errors="coerce")
     d = d[d.date.notna()]
     if not len(d):
         return pd.DataFrame()
