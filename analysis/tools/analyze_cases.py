@@ -703,6 +703,8 @@ def main():
                     help="для самопроверки: заложенный сдвиг тона в сигмах")
     ap.add_argument("--no-permutation", action="store_true", help="пропустить плацебо-тест")
     ap.add_argument("--no-lead", action="store_true", help="пропустить расчёт лид-тайма")
+    ap.add_argument("--base-weeks", type=int, default=BASE_WEEKS,
+                    help="сколько недель фона брать: 4 — как раньше, 8 — требует окна 120 дней")
     args = ap.parse_args()
     print(ВЕРСИЯ + "\n")
     if args.base_weeks != BASE_WEEKS:
