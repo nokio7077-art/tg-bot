@@ -184,12 +184,21 @@ def thin_out(C: pd.DataFrame, min_gap: int) -> tuple[pd.DataFrame, list[str]]:
 
 
 def mark_contamination(C: pd.DataFrame, all_eps: pd.DataFrame) -> pd.DataFrame:
-    """Отмечает кейсы, в чьё окно попадает другой эпизод той же пары."""
+    """Отмечает кейсы, в чьё окно попадает эпизод с участием любой из двух стран.
+
+    Проверять только точное совпадение пары мало. Удар США по Сирии 07.04.2017
+    попал в окна контролей Франция-Сирия и Великобритания-Сирия: пары другие,
+    а поток новостей о Сирии вырос, и «спокойное» окно оказалось не спокойным.
+    Именно на этих двух контролях объёмное правило дало ложные тревоги.
+    """
     notes = []
     for _, r in C.iterrows():
-        hits = all_eps[(all_eps.пара == r.пара) & (all_eps.эпизод != r.эпизод)
-                       & (all_eps.день_X >= r.окно_с) & (all_eps.день_X <= r.окно_по)]
-        notes.append("; ".join(f"{h.день_X.date()} {h.название}" for _, h in hits.iterrows()))
+        страны = {r.код_A, r.код_B}
+        hits = all_eps[(all_eps.эпизод != r.эпизод)
+                       & (all_eps.день_X >= r.окно_с) & (all_eps.день_X <= r.окно_по)
+                       & (all_eps.код_A.isin(страны) | all_eps.код_B.isin(страны))]
+        notes.append("; ".join(f"{h.день_X.date()} {h.название}"
+                               for _, h in hits.drop_duplicates(["день_X", "название"]).iterrows()))
     C = C.copy()
     C["фон_загрязнён"] = notes
     return C
@@ -217,7 +226,8 @@ def add_controls(C: pd.DataFrame, all_eps: pd.DataFrame, n: int, window: int,
             # буфер в одно окно с обеих сторон: слева — чтобы фон не состоял из
             # прошлой войны, справа — чтобы «спокойное» окно само не оказалось
             # предвоенным для эпизода, случившегося вскоре после него
-            clash = all_eps[(all_eps.пара == r.пара)
+            страны = {r.код_A, r.код_B}
+            clash = all_eps[(all_eps.код_A.isin(страны) | all_eps.код_B.isin(страны))
                             & (all_eps.день_X >= w_from - pd.Timedelta(days=window))
                             & (all_eps.день_X <= day_x + pd.Timedelta(days=window))]
             if len(clash):
