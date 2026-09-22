@@ -243,19 +243,119 @@ def permutation_test(T, cand, observed, B=B_PERM):
     return null, p
 
 
-def lead_times(cases_dir: str, T: pd.DataFrame, threshold: float = 1.0) -> pd.DataFrame:
-    """За сколько дней до дня X признак z_tone впервые перешёл порог."""
+def lead_times(cases_dir: str, T: pd.DataFrame, threshold: float = 1.0,
+               feat: str = "z_tone") -> pd.DataFrame:
+    """За сколько дней до дня X признак впервые перешёл порог.
+
+    Внимание: значение упирается в потолок. При окне 60 дней и 35 днях истории,
+    нужных для расчёта, раньше чем за 26 дней сигнал увидеть физически нельзя —
+    значения 26 означают «уже горел на самом раннем измеримом дне».
+    """
     out = []
     for _, r in T[T.метка == 1].iterrows():
         p = daily_from_case(os.path.join(cases_dir, r.файл))
         first = None
         for end in range(MIN_DAYS, len(p) + 1):
             f = features_at(p, end)
-            if f and f["z_tone"] >= threshold:
+            if f and f.get(feat, -99) >= threshold:
                 first = len(p) - end + 1
                 break
         out.append(dict(пара=r.пара, день_X=r.день_X, лид_тайм_дней=first))
     return pd.DataFrame(out)
+
+
+# --------------------------------------------------------------------------- #
+#  4б. Парный анализ: каждый контроль строился под конкретную войну
+# --------------------------------------------------------------------------- #
+def match_pairs(T: pd.DataFrame) -> list[tuple]:
+    """Сопоставляет контроль его войне по названию «контроль к «...»»."""
+    W, C = T[T.метка == 1], T[T.метка == 0].copy()
+    C["к_войне"] = C.название.str.extract(r"контроль к «(.+?)»\s*\(−\d")[0]
+    out = []
+    for _, c in C.iterrows():
+        m = W[(W.пара == c.пара) & (W.название == c.к_войне)]
+        if len(m) == 1:
+            out.append((c.пара, m.iloc[0], c))
+    return out
+
+
+def paired_report(T: pd.DataFrame, cand: list[str]):
+    """Сравнение «война против своего же контроля» — так дизайн и задуман.
+
+    Парный тест сильнее непарного: он убирает различия между парами государств
+    (Иран-США всегда освещают больше, чем Киргизию-Таджикистан).
+    """
+    mp = match_pairs(T)
+    if len(mp) < 6:
+        line("Сматчено слишком мало пар «война-контроль», парный анализ пропущен")
+        return None, mp
+    line(f"Сматчено пар «война-контроль»: {len(mp)}")
+    line(f"{'признак':<14}{'выше у войны':>14}{'медиана разницы':>18}{'Вилкоксон p':>14}{'d':>7}")
+    rows = []
+    for c in cand:
+        d = np.array([w[c] - ct[c] for _, w, ct in mp], float)
+        st = stats.wilcoxon(d)
+        rows.append(dict(признак=c, выше=int((d > 0).sum()), всего=len(d),
+                         медиана=float(np.median(d)), p=float(st.pvalue),
+                         d=float(d.mean() / d.std(ddof=1))))
+        line(f"{c:<14}{rows[-1]['выше']:>7}/{len(d):<6}{np.median(d):>18.3f}"
+             f"{st.pvalue:>14.4f}{rows[-1]['d']:>7.2f}")
+    P = pd.DataFrame(rows)
+    thr = 0.05 / len(cand)
+    line(f"\nПоправка Бонферрони на {len(cand)} признаков: значимо при p < {thr:.5f}")
+    surv = P[P.p < thr]
+    line("Проходят поправку: " + (", ".join(surv.признак) if len(surv) else "ни один"))
+    return P, mp
+
+
+def fixed_effects(T: pd.DataFrame, target: str):
+    """Регрессия с фиксированными эффектами пары и календарным годом.
+
+    Отвечает на вопрос «это правда предвоенный всплеск или просто со временем
+    новостей становится больше»: год входит отдельным регрессором.
+    """
+    df = T.copy()
+    df["год"] = pd.to_datetime(df.день_X).dt.year
+    D = pd.get_dummies(df.пара, drop_first=True).astype(float)
+    X = np.column_stack([np.ones(len(df)), df.метка.values.astype(float),
+                         (df.год.values - df.год.mean()).astype(float), D.values])
+    yv = df[target].values.astype(float)
+    b, *_ = np.linalg.lstsq(X, yv, rcond=None)
+    resid = yv - X @ b
+    dof = len(df) - X.shape[1]
+    if dof <= 0:
+        return None
+    cov = (resid @ resid / dof) * np.linalg.pinv(X.T @ X)
+    se = np.sqrt(np.diag(cov))
+    out = {}
+    for i, nm in [(1, "война"), (2, "год")]:
+        tst = b[i] / se[i]
+        out[nm] = (float(b[i]), float(se[i]), float(2 * (1 - stats.t.cdf(abs(tst), dof))))
+    return out
+
+
+def paired_and_fe_block(T: pd.DataFrame):
+    line()
+    line("=" * 78)
+    line("ПАРНЫЙ АНАЛИЗ: война против своего же контроля")
+    line("=" * 78)
+    P, mp = paired_report(T, CAND)
+    if P is None:
+        return None, None
+    best = P.sort_values("p").iloc[0].признак
+    line()
+    line("=" * 78)
+    line(f"ЭТО НЕ АРТЕФАКТ? Фикс. эффекты пары + календарный год, признак {best}")
+    line("=" * 78)
+    for feat in dict.fromkeys([best, "z_tone", "vol_ratio"]):
+        fe = fixed_effects(T, feat)
+        if fe is None:
+            continue
+        line(f"{feat:<14} война: {fe['война'][0]:+.3f} (p={fe['война'][2]:.4f})   "
+             f"год: {fe['год'][0]:+.3f} (p={fe['год'][2]:.4f})")
+    line("\nЕсли «год» значим и того же знака, что «война», — эффект может быть")
+    line("просто ростом корпуса GDELT со временем, а не предвоенным всплеском.")
+    return P, best
 
 
 # --------------------------------------------------------------------------- #
@@ -335,6 +435,8 @@ def report(T: pd.DataFrame, cases_dir: str | None, out_dir: str, do_perm=True, d
     if best != "модель":
         line("Обучение не дало выигрыша — значит хватает одного признака без модели.")
 
+    P_paired, best_paired = paired_and_fe_block(T)
+
     perm_p = None
     if do_perm:
         line()
@@ -381,9 +483,9 @@ def report(T: pd.DataFrame, cases_dir: str | None, out_dir: str, do_perm=True, d
     if do_lead and cases_dir:
         line()
         line("=" * 78)
-        line("ЛИД-ТАЙМ: за сколько дней сигнал срабатывает впервые")
+        line(f"ЛИД-ТАЙМ по признаку {best_paired or 'z_tone'}: за сколько дней сигнал сработал впервые")
         line("=" * 78)
-        L = lead_times(cases_dir, T)
+        L = lead_times(cases_dir, T, feat=(best_paired or "z_tone"))
         got = L.лид_тайм_дней.dropna()
         if len(got):
             line(f"Сработал на {len(got)} из {len(L)} войн")
@@ -406,6 +508,25 @@ def report(T: pd.DataFrame, cases_dir: str | None, out_dir: str, do_perm=True, d
         return 1 - stats.nct.cdf(crit, n1 + n2 - 2, nc) + stats.nct.cdf(-crit, n1 + n2 - 2, nc)
     grid = np.arange(0.05, 4.0, 0.01)
     d_min = next((d for d in grid if _power(d) >= 0.8), None)
+
+    # парный тест — основной для этого дизайна, непарный AUC его недооценивает
+    if P_paired is not None:
+        row = P_paired.sort_values("p").iloc[0]
+        thr = 0.05 / len(P_paired)
+        fe = fixed_effects(T, row.признак)
+        артефакт = fe is not None and fe["год"][2] < 0.05 and \
+                   np.sign(fe["год"][0]) == np.sign(fe["война"][0])
+        line(f"ПАРНОЕ СРАВНЕНИЕ (основное для этого дизайна): сильнее всего "
+             f"отличается {row.признак}.")
+        line(f"   у {int(row.выше)} войн из {int(row.всего)} он выше, чем у своего "
+             f"контроля, p = {row.p:.5f}, размер эффекта d = {row.d:.2f}")
+        if row.p < thr and not артефакт:
+            line("   поправку Бонферрони проходит, календарным трендом не объясняется")
+        elif артефакт:
+            line("   ОСТОРОЖНО: эффект может быть календарным трендом, а не войной")
+        else:
+            line("   поправку на множественные сравнения не проходит")
+        line()
 
     есть_сигнал = (lo_best > 0.5) and (perm_p is None or perm_p < 0.05)
     if есть_сигнал:
