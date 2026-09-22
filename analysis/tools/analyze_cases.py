@@ -243,25 +243,69 @@ def permutation_test(T, cand, observed, B=B_PERM):
     return null, p
 
 
-def lead_times(cases_dir: str, T: pd.DataFrame, threshold: float = 1.0,
-               feat: str = "z_tone") -> pd.DataFrame:
+# Порог имеет смысл только для признаков, нормированных на собственный фон пары.
+# log_vol и events_week — абсолютные уровни, у них «порог 1.0» срабатывает всегда.
+# по два порога на признак: мягкий часто срабатывает от шума, строгий — реже,
+# но его срабатывание что-то значит
+LEAD_SPECS = [("z_tone", 1.0), ("z_tone", 2.0),
+              ("z_vol", 1.0), ("z_vol", 2.0),
+              ("vol_ratio", 1.5), ("vol_ratio", 2.5)]
+LEAD_FALLBACK = {"log_vol": "z_vol", "events_week": "z_vol"}
+LEAD_CEILING = 60 - MIN_DAYS + 1      # сколько дней окна вообще доступно для наблюдения
+
+
+def lead_times(cases_dir: str, T: pd.DataFrame,
+               specs: list[tuple[str, float]] | None = None) -> pd.DataFrame:
     """За сколько дней до дня X признак впервые перешёл порог.
 
-    Внимание: значение упирается в потолок. При окне 60 дней и 35 днях истории,
-    нужных для расчёта, раньше чем за 26 дней сигнал увидеть физически нельзя —
-    значения 26 означают «уже горел на самом раннем измеримом дне».
+    Считается сразу по нескольким нормированным признакам, чтобы не гонять
+    чтение всех файлов повторно. Значение упирается в потолок: при окне 60 дней
+    и 35 днях истории, нужных на расчёт фона, раньше чем за 26 дней сигнал
+    увидеть физически нельзя. Такие наблюдения помечаются как цензурированные —
+    настоящий лид-тайм у них не меньше указанного, но насколько, мы не знаем.
     """
+    specs = specs or LEAD_SPECS
     out = []
     for _, r in T[T.метка == 1].iterrows():
         p = daily_from_case(os.path.join(cases_dir, r.файл))
-        first = None
-        for end in range(MIN_DAYS, len(p) + 1):
-            f = features_at(p, end)
-            if f and f.get(feat, -99) >= threshold:
-                first = len(p) - end + 1
-                break
-        out.append(dict(пара=r.пара, день_X=r.день_X, лид_тайм_дней=first))
+        if len(p) < MIN_DAYS:
+            continue
+        ends = list(range(MIN_DAYS, len(p) + 1))
+        vals = {e: features_at(p, e) for e in ends}
+        for feat, thr in specs:
+            first = None
+            for e in ends:
+                f = vals[e]
+                if f and f.get(feat) is not None and f[feat] >= thr:
+                    first = len(p) - e + 1
+                    break
+            out.append(dict(пара=r.пара, день_X=r.день_X, название=r.название,
+                            признак=feat, порог=thr, лид_тайм_дней=first,
+                            цензурировано=(first is not None and first >= len(ends))))
     return pd.DataFrame(out)
+
+
+def lead_report(L: pd.DataFrame):
+    """Печатает распределение лид-таймов с честной пометкой про цензурирование."""
+    n_wars = L[["пара", "день_X"]].drop_duplicates().shape[0]
+    line(f"{'признак':<14}{'порог':>7}{'сработал':>11}{'медиана':>10}"
+         f"{'квартили':>14}{'уткнулись в потолок':>22}")
+    for (feat, thr), grp in L.groupby(["признак", "порог"], sort=False):
+        got = grp.лид_тайм_дней.dropna()
+        cens = int(grp.цензурировано.sum())
+        if not len(got):
+            line(f"{feat:<14}{thr:>7.1f}{'0':>11}{'—':>10}{'—':>14}{'—':>22}")
+            continue
+        line(f"{feat:<14}{thr:>7.1f}{len(got):>6}/{n_wars:<4}{got.median():>10.0f}"
+             f"{f'{got.quantile(.25):.0f}-{got.quantile(.75):.0f}':>14}"
+             f"{f'{cens} из {len(got)}':>22}")
+    worst = L.groupby(["признак", "порог"]).цензурировано.mean().max()
+    if worst > 0.6:
+        line("\nВНИМАНИЕ: больше половины срабатываний уткнулись в потолок наблюдения.")
+        line("Это значит, что порог слишком мягкий либо окно в 60 дней слишком короткое:")
+        line("сигнал уже горел на самом раннем дне, который мы в принципе можем посчитать.")
+        line("Чтобы увидеть настоящий лид-тайм, нужен сбор с --window 120.")
+
 
 
 # --------------------------------------------------------------------------- #
@@ -483,17 +527,19 @@ def report(T: pd.DataFrame, cases_dir: str | None, out_dir: str, do_perm=True, d
     if do_lead and cases_dir:
         line()
         line("=" * 78)
-        line(f"ЛИД-ТАЙМ по признаку {best_paired or 'z_tone'}: за сколько дней сигнал сработал впервые")
+        line("ЛИД-ТАЙМ: за сколько дней до дня X сигнал сработал впервые")
         line("=" * 78)
-        L = lead_times(cases_dir, T, feat=(best_paired or "z_tone"))
-        got = L.лид_тайм_дней.dropna()
-        if len(got):
-            line(f"Сработал на {len(got)} из {len(L)} войн")
-            line(f"Медиана {got.median():.0f} дней, половина случаев "
-                 f"в диапазоне {got.quantile(.25):.0f}-{got.quantile(.75):.0f} дней")
-            line("Это и есть честный ответ про «примерные даты»: не дата, а окно.")
+        specs = list(LEAD_SPECS)
+        bp = LEAD_FALLBACK.get(best_paired, best_paired)
+        if bp and bp not in [s[0] for s in specs]:
+            specs.append((bp, 1.0))
+        L = lead_times(cases_dir, T, specs)
+        if len(L):
+            lead_report(L)
+            line("\nЭто и есть честный ответ про «примерные даты»: не дата, а окно,")
+            line("и часть наблюдений — «не меньше чем», а не точное число.")
         else:
-            line("Ни в одном кейсе порог не был перейдён")
+            line("Не удалось посчитать ни одного лид-тайма")
 
     line()
     line("=" * 78)
