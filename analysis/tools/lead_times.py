@@ -2,8 +2,12 @@
 # -*- coding: utf-8 -*-
 """Только лид-тайм: за сколько дней до дня X сигнал срабатывает впервые.
 
-Отдельный маленький скрипт, чтобы его нельзя было перепутать со старой версией
-analyze_cases.py. Ничего кроме pandas и numpy не нужно.
+Считает лид-тайм и для войн, и для контрольных окон. Второе обязательно:
+сигнал, который срабатывает в 37 войнах из 37, ничего не стоит, если он же
+срабатывает в 34 спокойных окнах из 34. Разница между этими двумя долями —
+и есть вся польза сигнала.
+
+Ничего кроме pandas и numpy не нужно.
 
     python lead_times.py cases
     python lead_times.py cases --out lead_times_v2.csv
@@ -19,7 +23,7 @@ import argparse, os, sys
 import numpy as np
 import pandas as pd
 
-ВЕРСИЯ = "lead_times.py v2 — пороги только по нормированным признакам"
+ВЕРСИЯ = "lead_times.py v3 — войны И контроли, чтобы видеть ложные срабатывания"
 WINDOW_DAYS, BASE_WEEKS = 7, 4
 MIN_DAYS = WINDOW_DAYS + BASE_WEEKS * 7          # 35 дней истории на расчёт фона
 SPECS = [("z_tone", 1.0), ("z_tone", 2.0),
@@ -75,10 +79,10 @@ def main():
     if not os.path.exists(cl):
         sys.exit(f"Нет файла {cl}")
     C = pd.read_csv(cl)
-    W = C[C.метка == 1]
     rows = []
-    for k, (_, r) in enumerate(W.iterrows(), start=1):
-        path = os.path.join(args.cases, f"{r.пара}_{r.день_X}.csv")
+    for k, (_, r) in enumerate(C.iterrows(), start=1):
+        суффикс = "" if int(r.метка) == 1 else "_control"
+        path = os.path.join(args.cases, f"{r.пара}_{r.день_X}{суффикс}.csv")
         if not os.path.exists(path):
             continue
         p = daily_from_case(path)
@@ -94,29 +98,51 @@ def main():
                 if f and f[feat] >= thr:
                     first = len(p) - e + 1
                     break
-            rows.append(dict(пара=r.пара, день_X=r.день_X, название=r.get("название", ""),
+            rows.append(dict(пара=r.пара, день_X=r.день_X, метка=int(r.метка),
+                             название=r.get("название", ""),
                              признак=feat, порог=thr, лид_тайм_дней=first,
                              цензурировано=bool(first is not None and first >= потолок),
                              потолок_дней=потолок))
-        print(f"  {k}/{len(W)}  {r.пара} {r.день_X}", flush=True)
+        print(f"  {k}/{len(C)}  {r.пара} {r.день_X}"
+              f"{' (контроль)' if суффикс else ''}", flush=True)
 
     L = pd.DataFrame(rows)
     if not len(L):
         sys.exit("Ни одного кейса посчитать не удалось")
     L.to_csv(args.out, index=False, encoding="utf-8-sig")
 
-    n_wars = L[["пара", "день_X"]].drop_duplicates().shape[0]
-    print(f"\nВойн обработано: {n_wars}\n")
-    print(f"{'признак':<12}{'порог':>7}{'сработал':>11}{'медиана':>10}{'квартили':>12}"
-          f"{'на потолке':>13}")
+    ключ = ["пара", "день_X", "метка"]
+    n_w = L[L.метка == 1][ключ].drop_duplicates().shape[0]
+    n_c = L[L.метка == 0][ключ].drop_duplicates().shape[0]
+    print(f"\nОбработано: войн {n_w}, контролей {n_c}\n")
+
+    print("СРАБАТЫВАНИЕ ХОТЯ БЫ РАЗ ЗА ОКНО НАБЛЮДЕНИЯ")
+    print(f"{'признак':<12}{'порог':>6}{'в войнах':>12}{'в контролях':>14}"
+          f"{'разница':>10}{'медиана лид-тайма':>20}")
+    итог = []
     for (feat, thr), grp in L.groupby(["признак", "порог"], sort=False):
-        got = grp.лид_тайм_дней.dropna()
+        w = grp[grp.метка == 1]; c = grp[grp.метка == 0]
+        tpr = w.лид_тайм_дней.notna().mean() if len(w) else float("nan")
+        fpr = c.лид_тайм_дней.notna().mean() if len(c) else float("nan")
+        med = w.лид_тайм_дней.dropna().median()
+        итог.append((feat, thr, tpr, fpr, med))
+        print(f"{feat:<12}{thr:>6.1f}{f'{tpr:.0%}':>12}{f'{fpr:.0%}':>14}"
+              f"{f'{tpr-fpr:+.0%}':>10}{(f'{med:.0f} дн.' if med == med else '—'):>20}")
+
+    print("\nРазница — это и есть польза сигнала. Если она около нуля, сигнал")
+    print("срабатывает одинаково часто перед войной и в спокойное время.")
+
+    print("\n\nЛИД-ТАЙМ ТОЛЬКО ПО ВОЙНАМ, С УЧЁТОМ ПОТОЛКА НАБЛЮДЕНИЯ")
+    print(f"{'признак':<12}{'порог':>6}{'сработал':>11}{'медиана':>9}"
+          f"{'квартили':>12}{'на потолке':>12}")
+    for (feat, thr), grp in L[L.метка == 1].groupby(["признак", "порог"], sort=False):
+        got = grp.лид_тайм_дней.dropna(); cens = int(grp.цензурировано.sum())
         if not len(got):
-            print(f"{feat:<12}{thr:>7.1f}{'0':>11}{'—':>10}{'—':>12}{'—':>13}")
-            continue
-        print(f"{feat:<12}{thr:>7.1f}{len(got):>6}/{n_wars:<4}{got.median():>10.0f}"
+            print(f"{feat:<12}{thr:>6.1f}{'0':>11}{'—':>9}{'—':>12}{'—':>12}"); continue
+        print(f"{feat:<12}{thr:>6.1f}{len(got):>5}/{n_w:<5}{got.median():>9.0f}"
               f"{f'{got.quantile(.25):.0f}-{got.quantile(.75):.0f}':>12}"
-              f"{f'{int(grp.цензурировано.sum())}/{len(got)}':>13}")
+              f"{f'{cens}/{len(got)}':>12}")
+
     print(f"\nФайл: {args.out}")
     print("«На потолке» — сигнал уже горел на самом раннем дне, который можно посчитать.")
     print("Для таких кейсов настоящий лид-тайм больше указанного, насколько — не видно.")
