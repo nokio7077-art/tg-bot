@@ -37,6 +37,7 @@ N_FEAT      = 3          # столько признаков берём в мо�
 B_BOOT      = 2000       # повторов бутстрапа
 B_PERM      = 1000       # повторов плацебо-теста
 RNG         = np.random.default_rng(20260919)
+ВЕРСИЯ      = "analyze_cases.py v3 — парный анализ, лид-тайм по нормированным признакам"
 
 CAND = ["z_tone", "z_gold", "z_mat", "z_hard", "z_force", "z_vol",
         "vol_ratio", "slope21_tone", "log_vol"]
@@ -700,6 +701,7 @@ def main():
     ap.add_argument("--no-permutation", action="store_true", help="пропустить плацебо-тест")
     ap.add_argument("--no-lead", action="store_true", help="пропустить расчёт лид-тайма")
     args = ap.parse_args()
+    print(ВЕРСИЯ + "\n")
 
     if args.self_test:
         import tempfile, shutil
