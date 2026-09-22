@@ -75,8 +75,14 @@ def main():
     ap = argparse.ArgumentParser(description="Лид-тайм по собранным кейсам")
     ap.add_argument("cases", help="папка, сделанная collect_cases.py")
     ap.add_argument("--out", default="lead_times_v2.csv")
+    ap.add_argument("--base-weeks", type=int, default=BASE_WEEKS,
+                    help="сколько недель фона брать: 4 — как раньше, 8 — требует окна 120 дней")
     args = ap.parse_args()
     print(ВЕРСИЯ + "\n")
+    if args.base_weeks != BASE_WEEKS:
+        globals()["BASE_WEEKS"] = args.base_weeks
+        globals()["MIN_DAYS"] = WINDOW_DAYS + args.base_weeks * 7
+        print(f"Фон: {args.base_weeks} недель, минимум истории {globals()['MIN_DAYS']} дней\n")
 
     cl = os.path.join(args.cases, "case_list.csv")
     if not os.path.exists(cl):

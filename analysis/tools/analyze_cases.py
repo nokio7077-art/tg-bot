@@ -30,7 +30,7 @@ import pandas as pd
 from scipy import stats
 
 WINDOW_DAYS = 7          # окно оценки
-BASE_WEEKS  = 4          # фон: столько недель перед окном
+BASE_WEEKS  = 4          # фон: столько недель перед окном (меняется флагом --base-weeks)
 MIN_DAYS    = WINDOW_DAYS + BASE_WEEKS * 7
 RIDGE       = 1.0        # регуляризация логрегрессии
 N_FEAT      = 3          # столько признаков берём в модель (37 войн -> больше нельзя)
@@ -705,6 +705,11 @@ def main():
     ap.add_argument("--no-lead", action="store_true", help="пропустить расчёт лид-тайма")
     args = ap.parse_args()
     print(ВЕРСИЯ + "\n")
+    if args.base_weeks != BASE_WEEKS:
+        globals()["BASE_WEEKS"] = args.base_weeks
+        globals()["MIN_DAYS"] = WINDOW_DAYS + args.base_weeks * 7
+        print(f"Фон: {args.base_weeks} недель, значит каждому кейсу нужно минимум "
+              f"{globals()['MIN_DAYS']} дней истории\n")
 
     if args.self_test:
         import tempfile, shutil
